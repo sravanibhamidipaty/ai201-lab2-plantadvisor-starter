@@ -122,7 +122,19 @@ for tool_call in assistant_message.tool_calls:
 *The loop should stop when: (a) the LLM returns a response with no tool calls, OR (b) the MAX_TOOL_ROUNDS limit is reached. Describe how you will detect each condition and what you will return in each case.*
 
 ```
-[your answer here]
+The loop runs inside `for round_num in range(MAX_TOOL_ROUNDS):`. On each iteration I make the LLM call and read assistant_message = response.choices[0].message.
+
+Condition (a) - No tool calls (normal exit):
+    If `not assistant_message.tool_calls` is true, the LLM has produced a final answer. I return assistant_message.content immediately from inside the loop. This is the only "successful" exit path.
+
+Condition (b) - MAX_TOOL_ROUNDS reached (safety valve):
+    If the LLM keeps requesting tools every round, the `for` loop runs out of iterations and falls through to the code AFTER the loop. There I return a user-readable fallback string (e.g. "Sorry -- I wasn't able to finish working out an answer for that. Could you rephrase or ask about one specific plant?") rather than crashing or returning.
+
+Edge cases handled:
+    - Empty content on a no-tool-call response: if assistant_message.content is None/empty, return the fallback string instead of "".
+    - dispatch_tool raising or returning an empty/"not found" result: the result is still appended as a "tool" message so the LLM can react; the round cap
+    prevents an infinite retry loop.
+    - The function therefore always returns a non-empty string.
 ```
 
 ---
@@ -132,7 +144,17 @@ for tool_call in assistant_message.tool_calls:
 *Once the loop exits because there are no more tool calls, how do you extract the text content from the response object? What field holds the string you should return?*
 
 ```
-[your answer here]
+The text lives on the assistant message of the first choice:
+
+    response.choices[0].message.content
+
+This is the same `assistant_message.content` I check in the no-tool-calls
+branch — `assistant_message = response.choices[0].message`, then return
+`assistant_message.content`. It's a plain `str` (or None if the model returned
+only tool calls, which is why the no-tool-call branch is the only place I read
+it for the final answer). Guard against a None/empty value by falling back to
+the user-readable fallback message before returning.
+
 ```
 
 ---
@@ -144,20 +166,67 @@ for tool_call in assistant_message.tool_calls:
 **Trace of a working agent turn (what tools were called and in what order):**
 
 ```
-Query: "How should I care for my calathea?"
-Round 1 tool call: [tool name, args]
-Round 2 tool call: [tool name, args] (if any)
-Final response: [brief description]
+Query: "How should I water my monstera this time of year?"
+Round 1 tool calls: lookup_plant({'plant_name': 'monstera'})  -> found: True
+                    get_seasonal_conditions({})               -> spring (auto-detected)
+Round 2: no tool calls -> final answer returned.
+Final response: Cites the monstera's specific watering data ("top 2 inches dry,
+  every 1-2 weeks") AND connects it to spring ("growing season beginning,
+  increase watering frequency"). Both tools fired because the question was
+  explicitly season-specific ("this time of year").
 ```
 
 **What happens when you ask about a plant that isn't in the database?**
 
 ```
-[describe the behavior you observed]
+Query "How do I care for my bird of paradise?" -> lookup_plant returns
+found: False with the not-found message. The agent acknowledges the plant
+isn't in the database, offers caveated general tropical-plant guidance, and
+does NOT invent specific care numbers as if it had real data. Graceful
+degradation, driven mainly by the instruction embedded in the not-found
+message (the lookup_plant return value), backed by the system prompt.
 ```
 
 **One thing about the tool call API that surprised you:**
 
 ```
-[your answer here]
+Two things:
+
+1. No-argument tool calls don't always send "{}". For get_seasonal_conditions
+   (no required params) the llama-3.3-70b model returned the arguments string
+   as "null", which json.loads turns into None — not a dict. dispatch_tool then
+   did None.get("season") and crashed. Fix: coerce "", "null", "{}" all to {}
+   before dispatching (raw_args or "{}", then json.loads(...) or {}).
+
+2. The model can emit a MALFORMED tool call that the API itself rejects with a
+   400 "tool_use_failed" (e.g. '<function=lookup_plant[]{"plant_name":...}'
+   instead of clean JSON). This happens most when a single turn asks it to look
+   up many plants at once (stress-test). It's a server-side 400, not something
+   you can prevent from the prompt alone — so the loop wraps the API call in
+   try/except and returns the user-readable fallback instead of crashing the turn.
 ```
+
+---
+
+## Optional Challenges — Notes
+
+**Challenge 1 — `get_plant_list()` tool:** Added a third tool (see
+`tool-functions-spec.md` Function 3). "What plants do you know about?" and
+"what's a good beginner plant?" both call `get_plant_list({})` once; the easy-first
+sort nudges beginner recommendations.
+
+**Challenge 2 — conversation memory:** Added a system-prompt instruction telling
+the agent to treat history as memory — track which plants the user has mentioned
+and connect later general questions to them. Verified: after "I just got a snake
+plant", the follow-up "What should I know about watering?" (no plant named) calls
+lookup_plant('snake plant') again and answers in context. The lever is the system
+prompt; the history is already in the messages list.
+
+**Challenge 3 — stress-test the loop:** Asking to compare 5 plants × 4 seasons in
+one turn was the heaviest. In practice the model batches several lookups as
+parallel tool calls in a single round rather than spreading them across rounds,
+so it rarely reaches MAX_TOOL_ROUNDS=5 — instead it tends to hit the malformed
+tool-call 400 first. When the cap *is* reached, the loop falls through and returns
+the fallback string. The more common real-world failure is the malformed
+generation, which the try/except now handles. Both failure modes return a
+non-empty, user-readable string rather than crashing.

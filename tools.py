@@ -21,42 +21,59 @@ _MONTH_TO_SEASON = {
 
 
 def lookup_plant(plant_name: str) -> dict:
-    """
-    Search the plant database for a plant by name and return its care information.
+    normalized = plant_name.strip().lower()
 
-    TODO — Milestone 1:
+    # 1. Direct key match - O(1)
+    if normalized in _plant_db:
+        return {"found": True, "plant": _plant_db[normalized]}
 
-    Right now this always returns a "not found" response. Your job is to implement
-    the search logic so it can actually find plants.
+    # 2. Display name, then 3. alias - one pass over the plants
+    for plant in _plant_db.values():
+        if plant["display_name"].lower() == normalized:
+            return {"found": True, "plant": plant}
+        if normalized in [alias.lower() for alias in plant["aliases"]]:
+            return {"found": True, "plant": plant}
 
-    The plant database (_plant_db) is a dict where keys are lowercase slugs like
-    "pothos", "snake_plant", "fiddle_leaf_fig". Each plant also has a "display_name"
-    field and an "aliases" list with common alternate names.
-
-    Your implementation should handle all three:
-      1. Direct key match (e.g., "pothos" → finds "pothos")
-      2. Display name match (e.g., "Pothos" → finds "pothos")
-      3. Alias match (e.g., "devil's ivy" → finds "pothos")
-
-    All matching should be case-insensitive. Strip whitespace from the input.
-
-    Return format when found:
-      {"found": True, "plant": <the full plant dict>}
-
-    Return format when not found:
-      {"found": False, "name": <original input>, "message": <helpful string>}
-
-    The message in the not-found case matters — the agent will use it to decide
-    what to tell the user. Your spec has a dedicated field for this — think about
-    what information would actually be helpful to the agent.
-
-    Before writing code, complete the lookup_plant section of specs/tool-functions-spec.md.
-    """
+    available = ", ".join(p["display_name"] for p in _plant_db.values())
     return {
         "found": False,
-        "name": plant_name,
-        "message": "Plant lookup not yet implemented. Complete Milestone 1.",
+        "name": normalized,
+        "message": (
+            f"No plant named '{normalized}' was found in the plant care database. "
+            f"The database covers these {len(_plant_db)} plants: {available}. "
+            f"Do not invent specific care facts for an unknown plant. Either ask "
+            f"the user to pick one of the plants above, check whether they meant "
+            f"one of them (the name may be a typo or a variety of a listed plant), "
+            f"or clearly tell them this plant isn't covered and keep any general "
+            f"advice high-level and caveated."
+        ),
     }
+
+
+def get_plant_list() -> dict:
+    """
+    Return a catalog of every plant in the database with its display name,
+    scientific name, and difficulty level.
+
+    Use this to answer "what plants do you know about?" or attribute-style
+    questions like "what's a good beginner plant?" — questions that can't be
+    answered by looking up a single plant by name. Returns names and difficulty
+    only (not full care data) so the agent can follow up with lookup_plant() for
+    whichever plant the user picks.
+    """
+    plants = [
+        {
+            "display_name": plant["display_name"],
+            "scientific_name": plant["scientific_name"],
+            "difficulty": plant["difficulty"],
+        }
+        for plant in _plant_db.values()
+    ]
+    # Sort by difficulty (easy first) then name, so "good beginner plant"
+    # questions surface the easy plants at the top of the list.
+    _difficulty_rank = {"easy": 0, "moderate": 1, "hard": 2}
+    plants.sort(key=lambda p: (_difficulty_rank.get(p["difficulty"], 99), p["display_name"]))
+    return {"count": len(plants), "plants": plants}
 
 
 def get_seasonal_conditions(season: str | None = None) -> dict:

@@ -70,7 +70,28 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 *Aliases are stored as a list of strings. How will you check if the normalized input matches any alias in the list? Write your approach in pseudocode or plain English.*
 
 ```
-[your answer here]
+For the current database size (~15 plants), iterate each plant and test membership against a lowercased copy of its alias list:
+
+    if normalized in [alias.lower() for alias in plant["aliases"]]:
+        return {"found": True, "plant": plant}
+
+Both sides are lowercased, the input once via .strip().lower() (stored as `normalized`), and each alias via the comprehension, which gives the case-insensitive match the contract requires. The same `normalized` value is reused for the key, display_name, and alias checks so all three stay consistent.
+
+SCALING NOTE - why this changes at thousands of plants:
+The approach above is O(n x aliases) per call because it re-scans every plant and rebuilds the lowercased alias list each time. At thousands of plants that's wasteful. The fix is to build a flat reverse-lookup dict ONCE at load time that maps every searchable name to its slug:
+
+    _name_index = {}
+    for slug, plant in _plant_db.items():
+        _name_index[slug] = slug
+        _name_index[plant["display_name"].lower()] = slug
+
+        for alias in plant["aliases"]:
+            _name_index[alias.lower()] = slug
+
+Then each lookup collapses to a single O(1) access:
+    slug = _name_index.get(normalized)
+
+A dict (hash map) is the right structure: keys are pre-normalized, lookups are constant time regardless of size, and the build cost is amortized across requests.
 ```
 
 ---
@@ -80,7 +101,14 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 *When a plant isn't found, the agent will read your message and use it to decide what to tell the user. Write the exact string you'll return — make it useful to the agent, not just to a human reading logs.*
 
 ```
-[your answer here]
+f"No plant named '{normalized}' was found in the plant care database. The "
+f"database covers these {len(_plant_db)} plants: {', '.join(p['display_name'] "
+f"for p in _plant_db.values())}. Do not invent specific care facts for an"
+f"unknown plant. Either ask the user to pick one of the plants above, check "
+f"whether they meant one of them (the name may be a typo or a variety of a "
+f"listed plant), or clearly tell them this plant isn't covered and keep any "
+f"general advice high-level and caveated."
+
 ```
 
 ---
@@ -91,17 +119,27 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 
 **Test: does `"devil's ivy"` return the pothos entry?**
 ```
-[yes / no — if no, describe what happened]
+Yes. The direct-key and display-name checks miss, then the alias check matches
+"devil's ivy" against the lowercased pothos aliases and returns the full pothos
+dict with found: True.
 ```
 
 **Test: does `"SNAKE PLANT"` return the snake plant entry?**
 ```
-[yes / no — if no, describe what happened]
+Yes. The input normalizes to "snake plant", which fails the direct-key check
+(the key is the slug "snake_plant", not the display name) but matches on the
+display_name comparison and returns the snake plant entry.
 ```
 
 **One edge case you discovered while implementing:**
 ```
-[your answer here]
+The slug key and the display name are not the same string — the key is
+"snake_plant" (underscore) while the display name is "Snake Plant" (space).
+Normalization handles casing and whitespace but does NOT convert spaces to
+underscores, so a user typing "snake plant" never hits the O(1) key match and
+only succeeds at the display-name step. For any multi-word plant the
+display-name and alias passes are doing the real work. Worth remembering if the
+reverse-index optimization is ever added.
 ```
 
 ---
@@ -183,12 +221,69 @@ The full season dict from `_season_data`, plus a `detected_season` boolean. Exam
 
 **Test: does calling with `season=None` return the correct season for the current month?**
 ```
-Current month: [month]
-Expected season: [season]
-Returned season: [season]
+Current month: May (month 5)
+Expected season: spring
+Returned season: spring (with detected_season: True)
 ```
 
 **Test: does calling with `season="winter"` return winter data regardless of the current month?**
 ```
-[yes / no]
+Yes. "winter" is in VALID_SEASONS, so the function uses it directly and returns
+the winter data with detected_season: False, even though the current month (May)
+would auto-detect to spring.
+```
+
+---
+
+## Function 3: `get_plant_list()` *(optional challenge — added)*
+
+### Purpose
+
+Answer catalog / attribute questions that `lookup_plant` can't, because the
+database can only be queried by a single name, not by attribute. Examples:
+"what plants do you know about?", "what's a good beginner plant?", "which
+plants are easy?". Returns a lightweight summary (name + difficulty), not full
+care data, so the agent can follow up with `lookup_plant` once the user picks one.
+
+### Input / Output Contract
+
+**Inputs:** none.
+
+**Output:** `dict`
+
+```python
+{
+    "count": 15,
+    "plants": [
+        {"display_name": "Aloe Vera", "scientific_name": "Aloe vera", "difficulty": "easy"},
+        ...
+    ],
+}
+```
+
+### Design Decisions
+
+- **Summary only, not full care data.** Returning every plant's complete care
+  dict would flood the context window for a question the user hasn't committed
+  to yet. Name + difficulty is enough for the agent to recommend or list, then
+  call `lookup_plant` for the chosen plant. This keeps the two tools composable:
+  `get_plant_list` for discovery, `lookup_plant` for detail.
+- **Sorted easy → hard, then alphabetical.** Difficulty is ranked
+  `easy=0, moderate=1, hard=2`. This means "good beginner plant" questions
+  surface the easy options at the top of the list the LLM reads, nudging better
+  recommendations without hardcoding any single answer.
+
+### Implementation Notes
+
+**Test: "what plants do you know about?"**
+```
+Agent calls get_plant_list({}) once, then summarizes all 15 plants grouped by
+difficulty. No lookup_plant call — it doesn't need full care data to list names.
+```
+
+**Test: "what's a good beginner plant?"**
+```
+Agent calls get_plant_list({}), sees the easy plants first (Aloe Vera, Chinese
+Evergreen, Peace Lily, Philodendron, Pothos, Snake Plant...), and recommends one
+(Pothos in testing), offering to look up its full care data next.
 ```
